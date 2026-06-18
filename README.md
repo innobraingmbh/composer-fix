@@ -6,11 +6,15 @@ version that is no longer affected.
 
 ## Installation
 
+Install it globally so `composer fix` is available in every project:
+
 ```bash
-composer require --dev innobrain/composer-fix
+composer global require innobrain/composer-fix
 ```
 
-Registers a single command, `composer fix`.
+Composer will ask to allow the plugin the first time — confirm, or add it to
+`allow-plugins` in your global `composer.json`. Registers a single command,
+`composer fix`.
 
 ## Usage
 
