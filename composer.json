@@ -1,0 +1,35 @@
+{
+  "name": "innobrain/composer-fix",
+  "description": "Fixes security vulnerabilities reported by composer audit by updating the affected packages.",
+  "type": "composer-plugin",
+  "license": "MIT",
+  "require": {
+    "php": "^8.1",
+    "composer-plugin-api": "^2.3"
+  },
+  "require-dev": {
+    "composer/composer": "^2.10",
+    "phpunit/phpunit": "^10.5"
+  },
+  "autoload": {
+    "psr-4": {
+      "Innobrain\\ComposerFix\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "Innobrain\\ComposerFix\\Tests\\": "tests/"
+    }
+  },
+  "scripts": {
+    "test": "phpunit"
+  },
+  "extra": {
+    "class": "Innobrain\\ComposerFix\\Plugin"
+  },
+  "config": {
+    "allow-plugins": {
+      "innobrain/composer-fix": true
+    }
+  }
+}
