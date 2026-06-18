@@ -12,16 +12,10 @@ use Composer\Semver\Constraint\ConstraintInterface;
 final class SafeVersionResolver
 {
     /**
-     * Pick the lowest known version of a package that escapes every advisory.
-     *
-     * The lowest qualifying version is preferred over the newest so that --force
-     * makes the smallest constraint bump that still removes the vulnerability,
-     * keeping the blast radius of breaking changes as small as possible. A
-     * candidate qualifies when it is stable enough for the root minimum
-     * stability, is not covered by the affected range, and is not a downgrade.
-     *
-     * Returns null when no such version exists — the caller reports the package
-     * as unfixable.
+     * Lowest known version that escapes every advisory — lowest, not newest, so
+     * --force makes the smallest constraint bump that removes the vulnerability.
+     * A candidate qualifies when it meets the minimum stability, is outside the
+     * affected range, and is not a downgrade. Null when none exists.
      *
      * @param  iterable<PackageInterface>  $candidates  every known version of the package
      */

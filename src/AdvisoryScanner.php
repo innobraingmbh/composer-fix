@@ -8,9 +8,9 @@ use Composer\Repository\RepositorySet;
 final class AdvisoryScanner
 {
     /**
-     * Match installed packages against the advisories published by the
-     * configured repositories. Composer only returns advisories whose affected
-     * range covers the installed version, so every result is actionable.
+     * Match installed packages against published advisories. Composer only
+     * returns advisories covering the installed version, so every result is
+     * actionable.
      *
      * @param  list<PackageInterface>  $installed
      */

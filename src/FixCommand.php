@@ -36,18 +36,16 @@ class FixCommand extends BaseCommand
             ])
             ->setHelp(
                 <<<'EOT'
-The <info>fix</info> command audits the installed packages and updates the ones with
-known security advisories to a version that is no longer affected.
+Audits installed packages and updates those with security advisories to a version
+that is no longer affected.
 
-By default it only updates within the constraints already in composer.json — the
-same versions a normal <info>composer update</info> would reach. Packages whose safe
-version is outside their constraint are reported but left untouched.
+By default it updates only within your existing composer.json constraints, like a
+normal <info>composer update</info>; packages whose safe version is out of range are
+reported but left untouched.
 
-With <info>--force</info> it rewrites the affected root constraints to the lowest safe
-version before updating, similar to <info>npm audit fix --force</info>. This can pull in
-breaking changes, so review the result.
-
-Use <info>--dry-run</info> to preview the plan without changing anything.
+<info>--force</info> first bumps the affected root constraints to the lowest safe version,
+like <info>npm audit fix --force</info>, which may pull in breaking changes. Use
+<info>--dry-run</info> to preview the plan.
 EOT
             )
         ;
@@ -187,12 +185,11 @@ EOT
             }
         }
 
-        // The unfiltered candidates straight from the repositories, plus the
-        // candidates that survive an actual pool build. The pool build fires
-        // PRE_POOL_CREATE through the live event dispatcher, so any plugin that
-        // prunes the pool — soak-time's release-age window in particular — also
-        // prunes our upgrade targets. A version present in the first set but
-        // missing from the second was held back by such a filter, not absent.
+        // Two candidate sets: every published version (findPackages) and only
+        // those that survive a real pool build (installableVersions). A version
+        // in the first but not the second was held back by a pool filter such as
+        // soak-time, so we report it instead of bumping to a version that won't
+        // install.
         $published = [];
         foreach (array_keys($rootRequired) as $name) {
             $published[$name] = $repoSet->findPackages($name);
@@ -244,9 +241,9 @@ EOT
     }
 
     /**
-     * Build a pool restricted to the given packages, going through the live
-     * event dispatcher so pool-filtering plugins (e.g. soak-time) get to prune
-     * versions exactly as they will during the real update.
+     * Versions that survive a real pool build — built through the live event
+     * dispatcher so pool-filtering plugins (e.g. soak-time) prune them just as
+     * they will during the update.
      *
      * @param  list<string>  $names
      * @return array<string, list<PackageInterface>>
@@ -277,9 +274,9 @@ EOT
     }
 
     /**
-     * Prefer a patch-level caret (e.g. ^5.4.20) so the constraint itself excludes
-     * the vulnerable lower versions, not just the resolved install. Falls back to
-     * Composer's own recommendation for branch/dev versions.
+     * Patch-level caret (e.g. ^5.4.20) so the constraint excludes the vulnerable
+     * lower versions, not just the install. Falls back to Composer's own
+     * recommendation for branch/dev versions.
      */
     private function recommendedConstraint(PackageInterface $safe, VersionSelector $versionSelector): string
     {
@@ -397,16 +394,15 @@ EOT
         foreach ($plan->transitive as $name) {
             $io->writeError(sprintf(
                 '<warning>[composer-fix] %s is a transitive dependency — no root constraint to bump. '
-                .'Add it to "require" or update its dependent if it stays vulnerable.</warning>',
+                .'Add it to "require" or update its dependent.</warning>',
                 $name,
             ));
         }
 
         foreach ($plan->heldBack as $held) {
             $io->writeError(sprintf(
-                '<warning>[composer-fix] A safe version of %s (%s) exists but is currently held back by an active pool '
-                .'filter (e.g. soak-time\'s release-age window). Leaving its constraint unchanged — re-run once it ages out, '
-                .'or override the filter for this package (e.g. SOAK_TIME_SKIP=%s).</warning>',
+                '<warning>[composer-fix] %s %s is safe but held back by a pool filter (e.g. soak-time). '
+                .'Leaving the constraint unchanged — re-run once it ages out, or skip the filter (SOAK_TIME_SKIP=%s).</warning>',
                 $held->name,
                 $held->safeVersion,
                 $held->name,
@@ -443,8 +439,8 @@ EOT
         }
 
         $io->writeError($force
-            ? '<warning>[composer-fix] Some safe versions are held back by a pool filter (e.g. soak-time) or need manual changes — see the notes above.</warning>'
-            : '<warning>[composer-fix] The safe versions are outside your constraints or held back by other packages. '
+            ? '<warning>[composer-fix] Some safe versions are held back by a pool filter or need manual changes — see above.</warning>'
+            : '<warning>[composer-fix] Safe versions are out of range or held back. '
                 .'Try `composer fix --force` (bump constraints) or `composer fix -W` (also update dependencies).</warning>');
     }
 }

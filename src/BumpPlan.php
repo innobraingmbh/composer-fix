@@ -5,10 +5,10 @@ namespace Innobrain\ComposerFix;
 final class BumpPlan
 {
     /**
-     * @param  list<ConstraintBump>  $bumps  root requirements whose constraint will be widened to a safe version
+     * @param  list<ConstraintBump>  $bumps  root constraints to widen to a safe version
      * @param  list<string>  $transitive  vulnerable packages with no root constraint to bump
-     * @param  list<HeldBackFix>  $heldBack  a safe version exists but an active pool filter (e.g. soak-time) hides it
-     * @param  list<string>  $unfixable  vulnerable packages with no published version that escapes the advisory
+     * @param  list<HeldBackFix>  $heldBack  safe version exists but a pool filter (e.g. soak-time) hides it
+     * @param  list<string>  $unfixable  no published version escapes the advisory
      */
     public function __construct(
         public readonly array $bumps,
