@@ -1,3 +1,7 @@
+[![Latest Version on Packagist](https://img.shields.io/packagist/v/innobrain/composer-fix.svg?style=flat-square)](https://packagist.org/packages/innobrain/composer-fix)
+[![Total Downloads](https://img.shields.io/packagist/dt/innobrain/composer-fix.svg?style=flat-square)](https://packagist.org/packages/innobrain/composer-fix)
+
+
 # composer-fix
 
 A Composer plugin that fixes known vulnerabilities like `npm audit fix`: it
