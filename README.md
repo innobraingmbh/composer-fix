@@ -31,6 +31,11 @@ default) and runs a targeted `composer update` on the affected ones, staying
 within your existing `composer.json` constraints. A package whose safe version
 is out of range is reported as still vulnerable rather than changed.
 
+Exits `0` when every advisory is resolved and `1` when packages remain
+vulnerable after the update, so CI pipelines fail on unfixed advisories.
+
+Requires Composer 2.9 or newer.
+
 ### Bumping constraints (`--force`)
 
 ```bash
@@ -57,7 +62,7 @@ Shows the plan without touching `composer.json`, the lock file, or `vendor/`.
 | --- | --- |
 | `--force` | Bump constraints when the safe version is out of range. |
 | `--dry-run` | Preview the plan without changing anything. |
-| `--no-dev` | Ignore `require-dev` packages. |
+| `--no-dev` | Ignore `require-dev` packages in the audit. Never installs or removes dev packages either way — vendor keeps its current dev/no-dev state. |
 | `-w`, `--with-dependencies` | Also update dependencies of affected packages (except root requirements). |
 | `-W`, `--with-all-dependencies` | Also update dependencies of affected packages, including root requirements. |
 | `--ignore-unreachable` | Ignore repositories that are unreachable or return a non-200. |
