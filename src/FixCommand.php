@@ -8,13 +8,13 @@ use Composer\DependencyResolver\Request;
 use Composer\Factory;
 use Composer\Installer;
 use Composer\IO\IOInterface;
-use Composer\Json\JsonFile;
 use Composer\Json\JsonManipulator;
 use Composer\Package\PackageInterface;
 use Composer\Package\Version\VersionSelector;
 use Composer\Repository\InstalledRepository;
 use Composer\Repository\RepositorySet;
 use Composer\Repository\RepositoryUtils;
+use RuntimeException;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
@@ -107,6 +107,8 @@ EOT
 
                 if ($lockBackup !== null) {
                     file_put_contents($lockFile, $lockBackup);
+                } elseif (file_exists($lockFile)) {
+                    unlink($lockFile);
                 }
 
                 $io->writeError('<error>[composer-fix] Update failed — restored composer.json'.($lockBackup !== null ? ' and composer.lock' : '').'.</error>');
@@ -116,7 +118,7 @@ EOT
         }
 
         if (! $dryRun) {
-            $this->reportResidual($io, $noDev, $ignoreUnreachable, $force);
+            return $this->reportResidual($io, $noDev, $ignoreUnreachable, $force);
         }
 
         return 0;
@@ -164,7 +166,7 @@ EOT
         $rootPackage = $composer->getPackage();
         $requires = $rootPackage->getRequires();
         $devRequires = $rootPackage->getDevRequires();
-        $minimumStability = $rootPackage->getMinimumStability() ?: 'stable';
+        $minimumStability = $rootPackage->getMinimumStability();
 
         $repoSet = $this->createRepositorySet($composer);
         $resolver = new SafeVersionResolver();
@@ -183,16 +185,6 @@ EOT
             } else {
                 $transitive[] = $name;
             }
-        }
-
-        // Two candidate sets: every published version (findPackages) and only
-        // those that survive a real pool build (installableVersions). A version
-        // in the first but not the second was held back by a pool filter such as
-        // soak-time, so we report it instead of bumping to a version that won't
-        // install.
-        $published = [];
-        foreach (array_keys($rootRequired) as $name) {
-            $published[$name] = $repoSet->findPackages($name);
         }
 
         $installable = $this->installableVersions($repoSet, $composer, array_keys($rootRequired));
@@ -228,7 +220,10 @@ EOT
                 continue;
             }
 
-            $safeIfNotFiltered = $resolver->lowestSafeVersion($published[$name] ?? [], $affected, $installedVersion, $minimumStability);
+            // No installable safe version. If one exists among all published
+            // versions, it was held back by a pool filter such as soak-time,
+            // so we report it instead of bumping to a version that won't install.
+            $safeIfNotFiltered = $resolver->lowestSafeVersion($repoSet->findPackages($name), $affected, $installedVersion, $minimumStability);
 
             if ($safeIfNotFiltered !== null) {
                 $heldBack[] = new HeldBackFix($name, $safeIfNotFiltered->getPrettyVersion());
@@ -295,37 +290,32 @@ EOT
 
         foreach ($plan->bumps as $bump) {
             if (! $manipulator->addLink($bump->requireKey, $bump->name, $bump->to, true)) {
-                $this->applyBumpsViaJsonFile($composerFile, $plan);
-
-                return;
+                throw new RuntimeException(sprintf(
+                    '[composer-fix] Unable to rewrite the "%s" constraint for %s in %s — bump it manually.',
+                    $bump->requireKey,
+                    $bump->name,
+                    $composerFile,
+                ));
             }
         }
 
         file_put_contents($composerFile, $manipulator->getContents());
     }
 
-    private function applyBumpsViaJsonFile(string $composerFile, BumpPlan $plan): void
-    {
-        $json = new JsonFile($composerFile);
-        $definition = $json->read();
-
-        foreach ($plan->bumps as $bump) {
-            $definition[$bump->requireKey][$bump->name] = $bump->to;
-        }
-
-        $json->write($definition);
-    }
-
     private function runUpdate(InputInterface $input, IOInterface $io, Composer $composer, array $allowList, bool $dryRun): int
     {
         $install = Installer::create($io, $composer);
+
+        // --no-dev only filters the audit; keep vendor as it was installed so
+        // fixing vulnerabilities never installs or removes dev packages.
+        $devMode = $composer->getRepositoryManager()->getLocalRepository()->getDevMode() ?? true;
 
         $install
             ->setDryRun($dryRun)
             ->setUpdate(true)
             ->setUpdateAllowList($allowList)
             ->setUpdateAllowTransitiveDependencies($this->transitiveFlag($input))
-            ->setDevMode(! (bool) $input->getOption('no-dev'))
+            ->setDevMode($devMode)
             ->setOptimizeAutoloader((bool) $composer->getConfig()->get('optimize-autoloader'))
             ->setPreferStable($composer->getPackage()->getPreferStable());
 
@@ -417,7 +407,11 @@ EOT
         }
     }
 
-    private function reportResidual(IOInterface $io, bool $noDev, bool $ignoreUnreachable, bool $force): void
+    /**
+     * Re-audits after the update. Returns 1 when advisories remain so CI fails
+     * on packages that could not be fixed.
+     */
+    private function reportResidual(IOInterface $io, bool $noDev, bool $ignoreUnreachable, bool $force): int
     {
         $this->resetComposer();
 
@@ -426,7 +420,7 @@ EOT
         if ($scan->isClean()) {
             $io->write('<info>[composer-fix] All advisories resolved.</info>');
 
-            return;
+            return 0;
         }
 
         $io->writeError(sprintf(
@@ -442,5 +436,7 @@ EOT
             ? '<warning>[composer-fix] Some safe versions are held back by a pool filter or need manual changes — see above.</warning>'
             : '<warning>[composer-fix] Safe versions are out of range or held back. '
                 .'Try `composer fix --force` (bump constraints) or `composer fix -W` (also update dependencies).</warning>');
+
+        return 1;
     }
 }
