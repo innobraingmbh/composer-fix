@@ -33,6 +33,7 @@ class FixCommand extends BaseCommand
                 new InputOption('with-dependencies', 'w', InputOption::VALUE_NONE, 'Also update the dependencies of the affected packages, except root requirements.'),
                 new InputOption('with-all-dependencies', 'W', InputOption::VALUE_NONE, 'Also update the dependencies of the affected packages, including root requirements.'),
                 new InputOption('ignore-unreachable', null, InputOption::VALUE_NONE, 'Ignore repositories that are unreachable or return a non-200 status code.'),
+                new InputOption('no-fail', null, InputOption::VALUE_NONE, 'Exit 0 even when packages remain vulnerable after the update.'),
             ])
             ->setHelp(
                 <<<'EOT'
@@ -46,6 +47,12 @@ reported but left untouched.
 <info>--force</info> first bumps the affected root constraints to the lowest safe version,
 like <info>npm audit fix --force</info>, which may pull in breaking changes. Use
 <info>--dry-run</info> to preview the plan.
+
+When vendor is not installed (e.g. a fresh clone), the audit falls back to the
+lock file, like <info>composer audit --locked</info>.
+
+Exits 1 when packages remain vulnerable after the update; pass <info>--no-fail</info>
+to exit 0 anyway.
 EOT
             )
         ;
@@ -118,7 +125,7 @@ EOT
         }
 
         if (! $dryRun) {
-            return $this->reportResidual($io, $noDev, $ignoreUnreachable, $force);
+            return $this->reportResidual($io, $noDev, $ignoreUnreachable, $force, (bool) $input->getOption('no-fail'));
         }
 
         return 0;
@@ -141,12 +148,36 @@ EOT
     private function installedPackages(Composer $composer, bool $noDev): array
     {
         $installedRepo = new InstalledRepository([$composer->getRepositoryManager()->getLocalRepository()]);
+        $packages = $installedRepo->getPackages();
 
-        if ($noDev) {
-            return array_values(RepositoryUtils::filterRequiredPackages($installedRepo->getPackages(), $composer->getPackage()));
+        if ($packages === []) {
+            return $this->lockedPackages($composer, $noDev);
         }
 
-        return array_values($installedRepo->getPackages());
+        if ($noDev) {
+            return array_values(RepositoryUtils::filterRequiredPackages($packages, $composer->getPackage()));
+        }
+
+        return array_values($packages);
+    }
+
+    /**
+     * On a fresh clone vendor/composer/installed.json does not exist yet, so
+     * audit the lock file instead, like `composer audit --locked`.
+     *
+     * @return list<PackageInterface>
+     */
+    private function lockedPackages(Composer $composer, bool $noDev): array
+    {
+        $locker = $composer->getLocker();
+
+        if (! $locker->isLocked()) {
+            throw new RuntimeException('[composer-fix] No installed packages and no lock file — nothing to audit. Run composer install or composer update first.');
+        }
+
+        $this->getIO()->writeError('<info>[composer-fix] vendor/ is not installed — auditing the lock file instead.</info>');
+
+        return array_values($locker->getLockedRepository(! $noDev)->getPackages());
     }
 
     private function createRepositorySet(Composer $composer): RepositorySet
@@ -409,9 +440,9 @@ EOT
 
     /**
      * Re-audits after the update. Returns 1 when advisories remain so CI fails
-     * on packages that could not be fixed.
+     * on packages that could not be fixed, unless --no-fail was passed.
      */
-    private function reportResidual(IOInterface $io, bool $noDev, bool $ignoreUnreachable, bool $force): int
+    private function reportResidual(IOInterface $io, bool $noDev, bool $ignoreUnreachable, bool $force, bool $noFail): int
     {
         $this->resetComposer();
 
@@ -437,6 +468,6 @@ EOT
             : '<warning>[composer-fix] Safe versions are out of range or held back. '
                 .'Try `composer fix --force` (bump constraints) or `composer fix -W` (also update dependencies).</warning>');
 
-        return 1;
+        return $noFail ? 0 : 1;
     }
 }

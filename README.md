@@ -31,8 +31,15 @@ default) and runs a targeted `composer update` on the affected ones, staying
 within your existing `composer.json` constraints. A package whose safe version
 is out of range is reported as still vulnerable rather than changed.
 
+If `vendor/` is not installed (e.g. a fresh clone), the audit falls back to
+`composer.lock`, like `composer audit --locked`. With neither `vendor/` nor a
+lock file there is nothing to audit, so the command errors with exit `1` —
+`--no-fail` does not cover this case.
+
 Exits `0` when every advisory is resolved and `1` when packages remain
-vulnerable after the update, so CI pipelines fail on unfixed advisories.
+vulnerable after the update, so CI pipelines fail on unfixed advisories. Pass
+`--no-fail` to exit `0` in that case too — useful when a wrapper treats any
+non-zero exit as a failed run and would discard the fixes that did land.
 
 Requires Composer 2.9 or newer.
 
@@ -66,6 +73,7 @@ Shows the plan without touching `composer.json`, the lock file, or `vendor/`.
 | `-w`, `--with-dependencies` | Also update dependencies of affected packages (except root requirements). |
 | `-W`, `--with-all-dependencies` | Also update dependencies of affected packages, including root requirements. |
 | `--ignore-unreachable` | Ignore repositories that are unreachable or return a non-200. |
+| `--no-fail` | Exit `0` even when packages remain vulnerable after the update. |
 
 ## Pool-filtering plugins (e.g. soak-time)
 
