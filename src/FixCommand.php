@@ -10,10 +10,15 @@ use Composer\Installer;
 use Composer\IO\IOInterface;
 use Composer\Json\JsonManipulator;
 use Composer\Package\PackageInterface;
+use Composer\Package\RootPackageInterface;
 use Composer\Package\Version\VersionSelector;
 use Composer\Repository\InstalledRepository;
 use Composer\Repository\RepositorySet;
 use Composer\Repository\RepositoryUtils;
+use Composer\Semver\Constraint\Constraint;
+use Composer\Semver\Constraint\ConstraintInterface;
+use Composer\Semver\Constraint\MatchAllConstraint;
+use Composer\Semver\Constraint\MultiConstraint;
 use RuntimeException;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
@@ -41,8 +46,13 @@ Audits installed packages and updates those with security advisories to a versio
 that is no longer affected.
 
 By default it updates only within your existing composer.json constraints, like a
-normal <info>composer update</info>; packages whose safe version is out of range are
-reported but left untouched.
+normal <info>composer update</info>. Packages whose safe version is not reachable —
+out of range, blocked by dependents, held back by a pool filter, or unfixable —
+are skipped and reported, so the reachable fixes still land.
+
+A branch head (dev version) is never treated as a fix: when only e.g. 10.x-dev
+escapes an advisory the package is reported as unfixable instead of updated to
+an untagged build.
 
 <info>--force</info> first bumps the affected root constraints to the lowest safe version,
 like <info>npm audit fix --force</info>, which may pull in breaking changes. Use
@@ -67,8 +77,10 @@ EOT
         $dryRun = (bool) $input->getOption('dry-run');
         $force = (bool) $input->getOption('force');
         $ignoreUnreachable = (bool) $input->getOption('ignore-unreachable');
+        $noFail = (bool) $input->getOption('no-fail');
 
-        $scan = $this->scan($composer, $noDev, $ignoreUnreachable);
+        $installed = $this->installedPackages($composer, $noDev);
+        $scan = $this->scan($composer, $installed, $ignoreUnreachable);
 
         foreach ($scan->unreachableRepos as $message) {
             $io->writeError('<warning>[composer-fix] '.$message.'</warning>');
@@ -82,31 +94,37 @@ EOT
 
         $this->reportVulnerabilities($io, $scan);
 
+        $plan = $this->plan($composer, $scan, $installed, $force);
+        $this->reportPlan($io, $plan, $dryRun);
+
         $composerFile = Factory::getComposerFile();
         $lockFile = Factory::getLockFile($composerFile);
         $jsonBackup = null;
         $lockBackup = null;
 
-        if ($force) {
-            $plan = $this->planBumps($composer, $scan);
-            $this->reportPlan($io, $plan, $dryRun);
+        if (! $dryRun && $plan->hasBumps()) {
+            $jsonBackup = file_get_contents($composerFile);
+            $lockBackup = file_exists($lockFile) ? file_get_contents($lockFile) : null;
 
-            if (! $dryRun && $plan->hasBumps()) {
-                $jsonBackup = file_get_contents($composerFile);
-                $lockBackup = file_exists($lockFile) ? file_get_contents($lockFile) : null;
+            $this->applyBumps($composerFile, $plan);
 
-                $this->applyBumps($composerFile, $plan);
+            $this->resetComposer();
+            $composer = $this->requireComposer();
+        }
 
-                $this->resetComposer();
-                $composer = $this->requireComposer();
-            }
+        $allowList = $plan->allowList();
+
+        if ($allowList === []) {
+            $io->write('<warning>[composer-fix] No affected package has a reachable safe version — nothing to update.</warning>');
+
+            return $dryRun ? 0 : $this->reportResidual($io, $scan, $force, $noFail);
         }
 
         $io->write($dryRun
             ? '<info>[composer-fix] Dry run — simulating an in-range update of the affected packages.</info>'
             : '<info>[composer-fix] Updating affected packages...</info>');
 
-        $status = $this->runUpdate($input, $io, $composer, $scan->names(), $dryRun);
+        $status = $this->runUpdate($input, $io, $composer, $allowList, $dryRun);
 
         if ($status !== 0) {
             if ($jsonBackup !== null) {
@@ -124,17 +142,21 @@ EOT
             return $status;
         }
 
-        if (! $dryRun) {
-            return $this->reportResidual($io, $noDev, $ignoreUnreachable, $force, (bool) $input->getOption('no-fail'));
+        if ($dryRun) {
+            return 0;
         }
 
-        return 0;
+        $this->resetComposer();
+        $composer = $this->requireComposer();
+        $freshInstalled = $this->installedPackages($composer, $noDev);
+
+        $residual = $this->scan($composer, $freshInstalled, $ignoreUnreachable);
+
+        return $this->reportResidual($io, $residual, $force, $noFail);
     }
 
-    private function scan(Composer $composer, bool $noDev, bool $ignoreUnreachable): ScanResult
+    private function scan(Composer $composer, array $installed, bool $ignoreUnreachable): ScanResult
     {
-        $installed = $this->installedPackages($composer, $noDev);
-
         if ($installed === []) {
             return new ScanResult([], []);
         }
@@ -192,7 +214,15 @@ EOT
         return $repoSet;
     }
 
-    private function planBumps(Composer $composer, ScanResult $scan): BumpPlan
+    /**
+     * Splits the vulnerable packages into what can actually be fixed and what
+     * must be skipped. Skipped packages stay off the update allow list so one
+     * unfixable package (EOL major, fix only in the next major) cannot trip
+     * Composer's advisory policy and fail the whole solve.
+     *
+     * @param  list<PackageInterface>  $installed
+     */
+    private function plan(Composer $composer, ScanResult $scan, array $installed, bool $force): BumpPlan
     {
         $rootPackage = $composer->getPackage();
         $requires = $rootPackage->getRequires();
@@ -203,67 +233,125 @@ EOT
         $resolver = new SafeVersionResolver();
         $versionSelector = new VersionSelector($repoSet);
 
-        $rootRequired = [];
-        $transitive = [];
-
-        foreach ($scan->vulnerabilities as $vulnerability) {
-            $name = $vulnerability->name();
-
-            if (isset($requires[$name])) {
-                $rootRequired[$name] = 'require';
-            } elseif (isset($devRequires[$name])) {
-                $rootRequired[$name] = 'require-dev';
-            } else {
-                $transitive[] = $name;
-            }
-        }
-
-        $installable = $this->installableVersions($repoSet, $composer, array_keys($rootRequired));
+        $installable = $this->installableVersions($repoSet, $composer, $scan->names());
 
         $bumps = [];
-        $heldBack = [];
-        $unfixable = [];
+        $updatable = [];
+        $skipped = [];
 
         foreach ($scan->vulnerabilities as $vulnerability) {
             $name = $vulnerability->name();
-
-            if (! isset($rootRequired[$name])) {
-                continue;
-            }
-
             $affected = $vulnerability->affectedConstraint();
             $installedVersion = $vulnerability->installedVersion();
+            $candidates = $installable[$name] ?? [];
 
-            $safe = $resolver->lowestSafeVersion($installable[$name] ?? [], $affected, $installedVersion, $minimumStability);
+            $requireKey = isset($requires[$name]) ? 'require' : (isset($devRequires[$name]) ? 'require-dev' : null);
 
-            if ($safe !== null) {
-                $requireKey = $rootRequired[$name];
-                $current = ($requireKey === 'require' ? $requires : $devRequires)[$name];
+            if ($force && $requireKey !== null) {
+                $safe = $resolver->lowestSafeVersion($candidates, $affected, $installedVersion, $minimumStability);
 
-                $bumps[] = new ConstraintBump(
-                    $name,
-                    $requireKey,
-                    $current->getPrettyConstraint(),
-                    $this->recommendedConstraint($safe, $versionSelector),
-                    $safe->getPrettyVersion(),
-                );
+                if ($safe !== null) {
+                    $current = ($requireKey === 'require' ? $requires : $devRequires)[$name];
+
+                    $bumps[] = new ConstraintBump(
+                        $name,
+                        $requireKey,
+                        $current->getPrettyConstraint(),
+                        $this->recommendedConstraint($safe, $versionSelector),
+                        $safe->getPrettyVersion(),
+                    );
+                } else {
+                    $skipped[] = $this->classifySkip($resolver, $repoSet, $vulnerability, $candidates, false, $minimumStability);
+                }
 
                 continue;
             }
 
-            // No installable safe version. If one exists among all published
-            // versions, it was held back by a pool filter such as soak-time,
-            // so we report it instead of bumping to a version that won't install.
-            $safeIfNotFiltered = $resolver->lowestSafeVersion($repoSet->findPackages($name), $affected, $installedVersion, $minimumStability);
+            $reachable = $this->constraintFor($rootPackage, $installed, $name);
 
-            if ($safeIfNotFiltered !== null) {
-                $heldBack[] = new HeldBackFix($name, $safeIfNotFiltered->getPrettyVersion());
+            $inRange = array_values(array_filter(
+                $candidates,
+                static fn (PackageInterface $candidate): bool => $reachable->matches(new Constraint('==', $candidate->getVersion())),
+            ));
+
+            if ($resolver->lowestSafeVersion($inRange, $affected, $installedVersion, $minimumStability) !== null) {
+                $updatable[] = $name;
             } else {
-                $unfixable[] = $name;
+                $skipped[] = $this->classifySkip($resolver, $repoSet, $vulnerability, $candidates, $requireKey === null, $minimumStability);
             }
         }
 
-        return new BumpPlan($bumps, $transitive, $heldBack, $unfixable);
+        return new BumpPlan($bumps, $updatable, $skipped);
+    }
+
+    /**
+     * Everything that pins the package's version: the root constraint plus the
+     * constraints of installed dependents, which stay locked during a targeted
+     * update.
+     *
+     * @param  list<PackageInterface>  $installed
+     */
+    private function constraintFor(RootPackageInterface $rootPackage, array $installed, string $name): ConstraintInterface
+    {
+        $constraints = [];
+
+        foreach ([$rootPackage->getRequires(), $rootPackage->getDevRequires()] as $links) {
+            if (isset($links[$name])) {
+                $constraints[] = $links[$name]->getConstraint();
+            }
+        }
+
+        foreach ($installed as $package) {
+            $link = $package->getRequires()[$name] ?? null;
+
+            if ($link !== null) {
+                $constraints[] = $link->getConstraint();
+            }
+        }
+
+        if ($constraints === []) {
+            return new MatchAllConstraint();
+        }
+
+        return MultiConstraint::create($constraints, true);
+    }
+
+    private function classifySkip(
+        SafeVersionResolver $resolver,
+        RepositorySet $repoSet,
+        Vulnerability $vulnerability,
+        array $installableCandidates,
+        bool $transitive,
+        string $minimumStability,
+    ): SkippedFix {
+        $name = $vulnerability->name();
+        $affected = $vulnerability->affectedConstraint();
+        $installedVersion = $vulnerability->installedVersion();
+
+        $installableSafe = $resolver->lowestSafeVersion($installableCandidates, $affected, $installedVersion, $minimumStability);
+
+        if ($installableSafe !== null) {
+            return new SkippedFix(
+                $name,
+                $transitive ? SkippedFix::TRANSITIVE : SkippedFix::OUT_OF_RANGE,
+                $installableSafe->getPrettyVersion(),
+            );
+        }
+
+        // No installable safe version. If one exists among all published
+        // versions, it was held back by a pool filter such as soak-time.
+        $published = $repoSet->findPackages($name);
+        $publishedSafe = $resolver->lowestSafeVersion($published, $affected, $installedVersion, $minimumStability);
+
+        if ($publishedSafe !== null) {
+            return new SkippedFix($name, SkippedFix::HELD_BACK, $publishedSafe->getPrettyVersion());
+        }
+
+        if ($resolver->lowestSafeVersion($published, $affected, $installedVersion, $minimumStability, allowDev: true) !== null) {
+            return new SkippedFix($name, SkippedFix::DEV_ONLY);
+        }
+
+        return new SkippedFix($name, SkippedFix::UNFIXABLE);
     }
 
     /**
@@ -412,42 +500,47 @@ EOT
             ));
         }
 
-        foreach ($plan->transitive as $name) {
-            $io->writeError(sprintf(
-                '<warning>[composer-fix] %s is a transitive dependency — no root constraint to bump. '
-                .'Add it to "require" or update its dependent.</warning>',
-                $name,
-            ));
-        }
-
-        foreach ($plan->heldBack as $held) {
-            $io->writeError(sprintf(
-                '<warning>[composer-fix] %s %s is safe but held back by a pool filter (e.g. soak-time). '
-                .'Leaving the constraint unchanged — re-run once it ages out, or skip the filter (SOAK_TIME_SKIP=%s).</warning>',
-                $held->name,
-                $held->safeVersion,
-                $held->name,
-            ));
-        }
-
-        foreach ($plan->unfixable as $name) {
-            $io->writeError(sprintf(
-                '<error>[composer-fix] No published version of %s escapes the advisory — cannot fix automatically.</error>',
-                $name,
-            ));
+        foreach ($plan->skipped as $skip) {
+            $io->writeError($this->skipMessage($skip));
         }
     }
 
-    /**
-     * Re-audits after the update. Returns 1 when advisories remain so CI fails
-     * on packages that could not be fixed, unless --no-fail was passed.
-     */
-    private function reportResidual(IOInterface $io, bool $noDev, bool $ignoreUnreachable, bool $force, bool $noFail): int
+    private function skipMessage(SkippedFix $skip): string
     {
-        $this->resetComposer();
+        return match ($skip->reason) {
+            SkippedFix::OUT_OF_RANGE => sprintf(
+                '<warning>[composer-fix] %s: safe version %s is outside the current constraint — skipping. Run composer fix --force to bump it.</warning>',
+                $skip->name,
+                $skip->safeVersion,
+            ),
+            SkippedFix::TRANSITIVE => sprintf(
+                '<warning>[composer-fix] %s: safe version %s is excluded by the constraints of its dependents — skipping. Update the dependents or require the package directly.</warning>',
+                $skip->name,
+                $skip->safeVersion,
+            ),
+            SkippedFix::HELD_BACK => sprintf(
+                '<warning>[composer-fix] %s %s is safe but held back by a pool filter (e.g. soak-time) — skipping. Re-run once it ages out, or skip the filter (SOAK_TIME_SKIP=%s).</warning>',
+                $skip->name,
+                $skip->safeVersion,
+                $skip->name,
+            ),
+            SkippedFix::DEV_ONLY => sprintf(
+                '<warning>[composer-fix] %s: only a dev branch escapes the advisory — a branch head is not a fix, skipping. Wait for a tagged release.</warning>',
+                $skip->name,
+            ),
+            default => sprintf(
+                '<error>[composer-fix] No published version of %s escapes the advisory — cannot fix automatically.</error>',
+                $skip->name,
+            ),
+        };
+    }
 
-        $scan = $this->scan($this->requireComposer(), $noDev, $ignoreUnreachable);
-
+    /**
+     * Reports what is still vulnerable after the run. Returns 1 so CI fails on
+     * packages that could not be fixed, unless --no-fail was passed.
+     */
+    private function reportResidual(IOInterface $io, ScanResult $scan, bool $force, bool $noFail): int
+    {
         if ($scan->isClean()) {
             $io->write('<info>[composer-fix] All advisories resolved.</info>');
 
@@ -455,7 +548,7 @@ EOT
         }
 
         $io->writeError(sprintf(
-            '<warning>[composer-fix] %d package(s) still vulnerable after the update:</warning>',
+            '<warning>[composer-fix] %d package(s) still vulnerable:</warning>',
             count($scan->vulnerabilities),
         ));
 

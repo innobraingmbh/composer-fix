@@ -28,8 +28,21 @@ composer fix
 
 Audits installed packages against your repositories' advisories (Packagist by
 default) and runs a targeted `composer update` on the affected ones, staying
-within your existing `composer.json` constraints. A package whose safe version
-is out of range is reported as still vulnerable rather than changed.
+within your existing `composer.json` constraints.
+
+Packages without a reachable fix are skipped — kept off the update list — so
+one unfixable package (an EOL major, a fix only published in the next major)
+cannot fail the whole solve under Composer's advisory policy and throw away
+the fixes that are reachable. Each skip is reported with its reason:
+
+- `out-of-range` — the safe version is outside the root constraint; `--force` can bump it.
+- `transitive` — the constraints of installed dependents exclude the safe version;
+  update the dependents or require the package directly.
+- `held-back` — a pool filter (e.g. soak-time) hides the safe version.
+- `dev-only` — only a branch head escapes the advisory. A dev build is never
+  treated as a fix: on an EOL major with `minimum-stability: dev` the solver
+  would otherwise land on e.g. `10.x-dev`, which only hides the advisory.
+- `unfixable` — no published version escapes the advisory.
 
 If `vendor/` is not installed (e.g. a fresh clone), the audit falls back to
 `composer.lock`, like `composer audit --locked`. With neither `vendor/` nor a
@@ -88,10 +101,13 @@ that won't resolve.
 ## How it works
 
 1. Match installed packages against advisories via Composer's advisory API.
-2. Build the list of affected packages.
+2. Split the affected packages into fixable and skipped: a package is fixable
+   when a safe, non-dev version survives the pool build and fits the root
+   constraint plus the constraints of installed dependents (which stay locked
+   during a targeted update).
 3. With `--force`, resolve the lowest safe version of each affected root
    requirement and rewrite its constraint.
-4. Run a targeted `composer update` on the affected packages.
+4. Run a targeted `composer update` on the fixable packages only.
 5. Re-audit and report anything still vulnerable.
 
 ## Development
