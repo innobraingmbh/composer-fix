@@ -44,6 +44,11 @@ the fixes that are reachable. Each skip is reported with its reason:
   would otherwise land on e.g. `10.x-dev`, which only hides the advisory.
 - `unfixable` — no published version escapes the advisory.
 
+After updating, any package whose `php` requirement exceeds the project's php
+floor (`config.platform.php`, or the lower bound of `require.php`) is reported
+as a warning — the lock may not install on the oldest php the project claims
+to support. This never fails the run.
+
 If `vendor/` is not installed (e.g. a fresh clone), the audit falls back to
 `composer.lock`, like `composer audit --locked`. With neither `vendor/` nor a
 lock file there is nothing to audit, so the command errors with exit `1` —
@@ -108,7 +113,8 @@ that won't resolve.
 3. With `--force`, resolve the lowest safe version of each affected root
    requirement and rewrite its constraint.
 4. Run a targeted `composer update` on the fixable packages only.
-5. Re-audit and report anything still vulnerable.
+5. Re-audit, warn about packages requiring php above the project floor, and
+   report anything still vulnerable.
 
 ## Development
 

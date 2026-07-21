@@ -4,6 +4,7 @@ namespace Innobrain\ComposerFix\Tests;
 
 use Composer\Advisory\SecurityAdvisory;
 use Composer\Composer;
+use Composer\Config;
 use Composer\Package\Link;
 use Composer\Package\Locker;
 use Composer\Package\Package;
@@ -160,6 +161,49 @@ final class FixCommandTest extends TestCase
         $this->assertFalse($constraint->matches($parser->parseConstraints('8.0.0')));
     }
 
+    public function test_platform_overshoots_flags_packages_above_the_configured_platform_php(): void
+    {
+        $composer = $this->composerWithPlatform(platformPhp: '8.1.0');
+
+        $tooNew = $this->package('symfony/console', '8.0.0');
+        $tooNew->setRequires(['php' => $this->link('symfony/console', 'php', '>=8.2')]);
+
+        $fine = $this->package('psr/log', '3.0.0');
+        $fine->setRequires(['php' => $this->link('psr/log', 'php', '>=8.0')]);
+
+        $overshoots = $this->platformOvershoots($composer, [$tooNew, $fine]);
+
+        $this->assertCount(1, $overshoots);
+        $this->assertSame('symfony/console', $overshoots[0]['package']);
+        $this->assertSame('>=8.2', $overshoots[0]['requiresPhp']);
+    }
+
+    public function test_platform_overshoots_falls_back_to_the_require_php_floor(): void
+    {
+        $composer = $this->composerWithPlatform(platformPhp: null, requirePhp: '^8.1');
+
+        $tooNew = $this->package('symfony/console', '8.0.0');
+        $tooNew->setRequires(['php' => $this->link('symfony/console', 'php', '>=8.2')]);
+
+        $fine = $this->package('psr/log', '3.0.0');
+        $fine->setRequires(['php' => $this->link('psr/log', 'php', '^8.1')]);
+
+        $overshoots = $this->platformOvershoots($composer, [$tooNew, $fine]);
+
+        $this->assertCount(1, $overshoots);
+        $this->assertSame('symfony/console', $overshoots[0]['package']);
+    }
+
+    public function test_platform_overshoots_is_silent_without_a_php_floor(): void
+    {
+        $composer = $this->composerWithPlatform(platformPhp: null);
+
+        $package = $this->package('symfony/console', '8.0.0');
+        $package->setRequires(['php' => $this->link('symfony/console', 'php', '>=8.2')]);
+
+        $this->assertSame([], $this->platformOvershoots($composer, [$package]));
+    }
+
     private function classifySkip(
         Vulnerability $vulnerability,
         array $installable,
@@ -181,6 +225,34 @@ final class FixCommandTest extends TestCase
             $transitive,
             $minimumStability,
         );
+    }
+
+    private function platformOvershoots(Composer $composer, array $installed): array
+    {
+        $method = new ReflectionMethod(FixCommand::class, 'platformOvershoots');
+
+        return $method->invoke(new FixCommand(), $composer, $installed);
+    }
+
+    private function composerWithPlatform(?string $platformPhp, ?string $requirePhp = null): Composer
+    {
+        $config = new Config(false);
+
+        if ($platformPhp !== null) {
+            $config->merge(['config' => ['platform' => ['php' => $platformPhp]]]);
+        }
+
+        $root = new RootPackage('root/root', '1.0.0.0', '1.0.0');
+
+        if ($requirePhp !== null) {
+            $root->setRequires(['php' => $this->link('root/root', 'php', $requirePhp)]);
+        }
+
+        $composer = new Composer();
+        $composer->setConfig($config);
+        $composer->setPackage($root);
+
+        return $composer;
     }
 
     private function vulnerability(string $name, string $installed, string $affected): Vulnerability

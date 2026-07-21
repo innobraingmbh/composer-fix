@@ -19,6 +19,7 @@ use Composer\Semver\Constraint\Constraint;
 use Composer\Semver\Constraint\ConstraintInterface;
 use Composer\Semver\Constraint\MatchAllConstraint;
 use Composer\Semver\Constraint\MultiConstraint;
+use Composer\Semver\VersionParser;
 use RuntimeException;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
@@ -57,6 +58,10 @@ an untagged build.
 <info>--force</info> first bumps the affected root constraints to the lowest safe version,
 like <info>npm audit fix --force</info>, which may pull in breaking changes. Use
 <info>--dry-run</info> to preview the plan.
+
+After updating, any package whose php requirement exceeds the project's php
+floor (config.platform.php, or the lower bound of require.php) is reported as
+a warning.
 
 When vendor is not installed (e.g. a fresh clone), the audit falls back to the
 lock file, like <info>composer audit --locked</info>.
@@ -149,6 +154,8 @@ EOT
         $this->resetComposer();
         $composer = $this->requireComposer();
         $freshInstalled = $this->installedPackages($composer, $noDev);
+
+        $this->reportOvershoots($io, $this->platformOvershoots($composer, $freshInstalled));
 
         $residual = $this->scan($composer, $freshInstalled, $ignoreUnreachable);
 
@@ -533,6 +540,66 @@ EOT
                 $skip->name,
             ),
         };
+    }
+
+    /**
+     * Packages whose php requirement exceeds the project's php floor —
+     * config.platform.php, or the lower bound of require.php. Such a lock
+     * would not install on the oldest php the project claims to support.
+     *
+     * @param  list<PackageInterface>  $installed
+     * @return list<array{package: string, requiresPhp: string, platformPhp: string}>
+     */
+    private function platformOvershoots(Composer $composer, array $installed): array
+    {
+        $platform = $composer->getConfig()->get('platform');
+        $configured = is_array($platform) ? ($platform['php'] ?? null) : null;
+
+        if ($configured !== null) {
+            $floor = (new VersionParser())->normalize((string) $configured);
+            $label = $configured.' (config.platform.php)';
+        } else {
+            $phpLink = $composer->getPackage()->getRequires()['php'] ?? null;
+
+            if ($phpLink === null) {
+                return [];
+            }
+
+            $floor = $phpLink->getConstraint()->getLowerBound()->getVersion();
+            $label = $phpLink->getPrettyConstraint().' (require.php)';
+        }
+
+        $floorVersion = new Constraint('==', $floor);
+        $overshoots = [];
+
+        foreach ($installed as $package) {
+            $link = $package->getRequires()['php'] ?? null;
+
+            if ($link !== null && ! $link->getConstraint()->matches($floorVersion)) {
+                $overshoots[] = [
+                    'package' => $package->getName(),
+                    'requiresPhp' => $link->getPrettyConstraint(),
+                    'platformPhp' => $label,
+                ];
+            }
+        }
+
+        return $overshoots;
+    }
+
+    /**
+     * @param  list<array{package: string, requiresPhp: string, platformPhp: string}>  $overshoots
+     */
+    private function reportOvershoots(IOInterface $io, array $overshoots): void
+    {
+        foreach ($overshoots as $overshoot) {
+            $io->writeError(sprintf(
+                '<warning>[composer-fix] %s requires php %s, above the project floor of %s — the lock may not install on every php the project supports.</warning>',
+                $overshoot['package'],
+                $overshoot['requiresPhp'],
+                $overshoot['platformPhp'],
+            ));
+        }
     }
 
     /**
