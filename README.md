@@ -81,6 +81,31 @@ composer fix --dry-run
 
 Shows the plan without touching `composer.json`, the lock file, or `vendor/`.
 
+### Machine-readable output (`--json`)
+
+```bash
+composer fix --json
+```
+
+Moves all human-readable messages to stderr and prints a JSON document as the
+**last line of stdout** (update scripts such as `artisan package:discover` may
+write to stdout before it, so parse the last line):
+
+```json
+{
+  "advisories": [{"package": "...", "installed": "...", "severity": "high", "advisories": [{"title": "...", "cve": "...", "link": "..."}]}],
+  "planned": ["packages/passed-to-the-updater"],
+  "bumped": [{"package": "...", "requireKey": "require", "from": "^1.0", "to": "^2.1.1", "safeVersion": "2.1.1"}],
+  "skipped": [{"package": "...", "reason": "out-of-range", "safeVersion": "2.1.1"}],
+  "updated": [{"package": "...", "from": "1.5.0", "to": "1.8.2"}],
+  "stillVulnerable": [{"package": "...", "installed": "1.8.0"}],
+  "platformWarnings": [{"package": "...", "requiresPhp": ">=8.2", "platformPhp": "^8.1 (require.php)"}]
+}
+```
+
+`stillVulnerable` is `null` when the post-update state is unknown (dry run or a
+failed update). The exit code keeps its usual meaning.
+
 ### Options
 
 | Option | Description |
@@ -92,6 +117,7 @@ Shows the plan without touching `composer.json`, the lock file, or `vendor/`.
 | `-W`, `--with-all-dependencies` | Also update dependencies of affected packages, including root requirements. |
 | `--ignore-unreachable` | Ignore repositories that are unreachable or return a non-200. |
 | `--no-fail` | Exit `0` even when packages remain vulnerable after the update. |
+| `--json` | Print a machine-readable result as the last line of stdout; messages move to stderr. |
 
 ## Pool-filtering plugins (e.g. soak-time)
 

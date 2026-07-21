@@ -27,6 +27,8 @@ use Symfony\Component\Console\Output\OutputInterface;
 
 class FixCommand extends BaseCommand
 {
+    private bool $json = false;
+
     protected function configure(): void
     {
         $this
@@ -40,6 +42,7 @@ class FixCommand extends BaseCommand
                 new InputOption('with-all-dependencies', 'W', InputOption::VALUE_NONE, 'Also update the dependencies of the affected packages, including root requirements.'),
                 new InputOption('ignore-unreachable', null, InputOption::VALUE_NONE, 'Ignore repositories that are unreachable or return a non-200 status code.'),
                 new InputOption('no-fail', null, InputOption::VALUE_NONE, 'Exit 0 even when packages remain vulnerable after the update.'),
+                new InputOption('json', null, InputOption::VALUE_NONE, 'Print a machine-readable result as the last line of stdout; messages move to stderr.'),
             ])
             ->setHelp(
                 <<<'EOT'
@@ -66,6 +69,9 @@ a warning.
 When vendor is not installed (e.g. a fresh clone), the audit falls back to the
 lock file, like <info>composer audit --locked</info>.
 
+<info>--json</info> prints a machine-readable summary as the last line of stdout
+(update scripts may write to stdout before it) and moves all other output to stderr.
+
 Exits 1 when packages remain vulnerable after the update; pass <info>--no-fail</info>
 to exit 0 anyway.
 EOT
@@ -83,6 +89,7 @@ EOT
         $force = (bool) $input->getOption('force');
         $ignoreUnreachable = (bool) $input->getOption('ignore-unreachable');
         $noFail = (bool) $input->getOption('no-fail');
+        $this->json = (bool) $input->getOption('json');
 
         $installed = $this->installedPackages($composer, $noDev);
         $scan = $this->scan($composer, $installed, $ignoreUnreachable);
@@ -92,9 +99,9 @@ EOT
         }
 
         if ($scan->isClean()) {
-            $io->write('<info>[composer-fix] No security vulnerability advisories found for installed packages.</info>');
+            $this->status($io, '<info>[composer-fix] No security vulnerability advisories found for installed packages.</info>');
 
-            return 0;
+            return $this->finish($output, $scan, new BumpPlan([], [], []), [], $scan, [], 0);
         }
 
         $this->reportVulnerabilities($io, $scan);
@@ -120,12 +127,16 @@ EOT
         $allowList = $plan->allowList();
 
         if ($allowList === []) {
-            $io->write('<warning>[composer-fix] No affected package has a reachable safe version — nothing to update.</warning>');
+            $this->status($io, '<warning>[composer-fix] No affected package has a reachable safe version — nothing to update.</warning>');
 
-            return $dryRun ? 0 : $this->reportResidual($io, $scan, $force, $noFail);
+            if ($dryRun) {
+                return $this->finish($output, $scan, $plan, [], null, [], 0);
+            }
+
+            return $this->finish($output, $scan, $plan, [], $scan, [], $this->reportResidual($io, $scan, $force, $noFail));
         }
 
-        $io->write($dryRun
+        $this->status($io, $dryRun
             ? '<info>[composer-fix] Dry run — simulating an in-range update of the affected packages.</info>'
             : '<info>[composer-fix] Updating affected packages...</info>');
 
@@ -144,22 +155,24 @@ EOT
                 $io->writeError('<error>[composer-fix] Update failed — restored composer.json'.($lockBackup !== null ? ' and composer.lock' : '').'.</error>');
             }
 
-            return $status;
+            return $this->finish($output, $scan, $plan, [], null, [], $status);
         }
 
         if ($dryRun) {
-            return 0;
+            return $this->finish($output, $scan, $plan, [], null, [], 0);
         }
 
         $this->resetComposer();
         $composer = $this->requireComposer();
         $freshInstalled = $this->installedPackages($composer, $noDev);
 
-        $this->reportOvershoots($io, $this->platformOvershoots($composer, $freshInstalled));
+        $updated = $this->updatedVersions($scan, $freshInstalled);
+        $overshoots = $this->platformOvershoots($composer, $freshInstalled);
+        $this->reportOvershoots($io, $overshoots);
 
         $residual = $this->scan($composer, $freshInstalled, $ignoreUnreachable);
 
-        return $this->reportResidual($io, $residual, $force, $noFail);
+        return $this->finish($output, $scan, $plan, $updated, $residual, $overshoots, $this->reportResidual($io, $residual, $force, $noFail));
     }
 
     private function scan(Composer $composer, array $installed, bool $ignoreUnreachable): ScanResult
@@ -463,7 +476,7 @@ EOT
 
     private function reportVulnerabilities(IOInterface $io, ScanResult $scan): void
     {
-        $io->write(sprintf(
+        $this->status($io, sprintf(
             '<warning>[composer-fix] Found %d advisory(ies) affecting %d installed package(s):</warning>',
             $scan->advisoryCount(),
             count($scan->vulnerabilities),
@@ -472,7 +485,7 @@ EOT
         foreach ($scan->vulnerabilities as $vulnerability) {
             $severity = $vulnerability->highestSeverity();
 
-            $io->write(sprintf(
+            $this->status($io, sprintf(
                 '  <info>%s</info> (%s)%s',
                 $vulnerability->name(),
                 $vulnerability->prettyInstalledVersion(),
@@ -480,14 +493,14 @@ EOT
             ));
 
             foreach ($vulnerability->advisories as $advisory) {
-                $io->write(sprintf(
+                $this->status($io, sprintf(
                     '    %s%s',
                     $advisory->title,
                     $advisory->cve !== null && $advisory->cve !== '' ? ' ('.$advisory->cve.')' : '',
                 ));
 
                 if ($io->isVerbose() && $advisory->link !== null && $advisory->link !== '') {
-                    $io->write('      '.$advisory->link);
+                    $this->status($io, '      '.$advisory->link);
                 }
             }
         }
@@ -496,7 +509,7 @@ EOT
     private function reportPlan(IOInterface $io, BumpPlan $plan, bool $dryRun): void
     {
         foreach ($plan->bumps as $bump) {
-            $io->write(sprintf(
+            $this->status($io, sprintf(
                 '<info>[composer-fix] %s %s: %s -> %s (safe: %s)%s</info>',
                 $dryRun ? 'Would bump' : 'Bumping',
                 $bump->name,
@@ -540,6 +553,35 @@ EOT
                 $skip->name,
             ),
         };
+    }
+
+    /**
+     * @param  list<PackageInterface>  $freshInstalled
+     * @return list<array{package: string, from: string, to: string}>
+     */
+    private function updatedVersions(ScanResult $scan, array $freshInstalled): array
+    {
+        $byName = [];
+
+        foreach ($freshInstalled as $package) {
+            $byName[$package->getName()] = $package->getPrettyVersion();
+        }
+
+        $updated = [];
+
+        foreach ($scan->vulnerabilities as $vulnerability) {
+            $now = $byName[$vulnerability->name()] ?? null;
+
+            if ($now !== null && $now !== $vulnerability->prettyInstalledVersion()) {
+                $updated[] = [
+                    'package' => $vulnerability->name(),
+                    'from' => $vulnerability->prettyInstalledVersion(),
+                    'to' => $now,
+                ];
+            }
+        }
+
+        return $updated;
     }
 
     /**
@@ -609,7 +651,7 @@ EOT
     private function reportResidual(IOInterface $io, ScanResult $scan, bool $force, bool $noFail): int
     {
         if ($scan->isClean()) {
-            $io->write('<info>[composer-fix] All advisories resolved.</info>');
+            $this->status($io, '<info>[composer-fix] All advisories resolved.</info>');
 
             return 0;
         }
@@ -629,5 +671,72 @@ EOT
                 .'Try `composer fix --force` (bump constraints) or `composer fix -W` (also update dependencies).</warning>');
 
         return $noFail ? 0 : 1;
+    }
+
+    /**
+     * With --json, prints the machine-readable result as the last line of
+     * stdout. $residual is null when the post-update state is unknown
+     * (dry run or a failed update).
+     *
+     * @param  list<array{package: string, from: string, to: string}>  $updated
+     * @param  list<array{package: string, requiresPhp: string, platformPhp: string}>  $overshoots
+     */
+    private function finish(
+        OutputInterface $output,
+        ScanResult $scan,
+        BumpPlan $plan,
+        array $updated,
+        ?ScanResult $residual,
+        array $overshoots,
+        int $exitCode,
+    ): int {
+        if (! $this->json) {
+            return $exitCode;
+        }
+
+        $result = [
+            'advisories' => array_map(static fn (Vulnerability $vulnerability): array => [
+                'package' => $vulnerability->name(),
+                'installed' => $vulnerability->prettyInstalledVersion(),
+                'severity' => $vulnerability->highestSeverity(),
+                'advisories' => array_map(static fn ($advisory): array => [
+                    'title' => $advisory->title,
+                    'cve' => $advisory->cve,
+                    'link' => $advisory->link,
+                ], $vulnerability->advisories),
+            ], $scan->vulnerabilities),
+            'planned' => $plan->allowList(),
+            'bumped' => array_map(static fn (ConstraintBump $bump): array => [
+                'package' => $bump->name,
+                'requireKey' => $bump->requireKey,
+                'from' => $bump->from,
+                'to' => $bump->to,
+                'safeVersion' => $bump->safeVersion,
+            ], $plan->bumps),
+            'skipped' => array_map(static fn (SkippedFix $skip): array => [
+                'package' => $skip->name,
+                'reason' => $skip->reason,
+                'safeVersion' => $skip->safeVersion,
+            ], $plan->skipped),
+            'updated' => $updated,
+            'stillVulnerable' => $residual === null ? null : array_map(static fn (Vulnerability $vulnerability): array => [
+                'package' => $vulnerability->name(),
+                'installed' => $vulnerability->prettyInstalledVersion(),
+            ], $residual->vulnerabilities),
+            'platformWarnings' => $overshoots,
+        ];
+
+        $output->writeln((string) json_encode($result, JSON_UNESCAPED_SLASHES));
+
+        return $exitCode;
+    }
+
+    /**
+     * Status messages go to stdout normally, but to stderr in --json mode so
+     * stdout stays parseable.
+     */
+    private function status(IOInterface $io, string $message): void
+    {
+        $this->json ? $io->writeError($message) : $io->write($message);
     }
 }

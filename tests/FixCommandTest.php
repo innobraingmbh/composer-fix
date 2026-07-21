@@ -18,6 +18,7 @@ use Composer\Semver\VersionParser;
 use DateTimeImmutable;
 use Innobrain\ComposerFix\FixCommand;
 use Innobrain\ComposerFix\SafeVersionResolver;
+use Innobrain\ComposerFix\ScanResult;
 use Innobrain\ComposerFix\SkippedFix;
 use Innobrain\ComposerFix\Vulnerability;
 use PHPUnit\Framework\TestCase;
@@ -202,6 +203,24 @@ final class FixCommandTest extends TestCase
         $package->setRequires(['php' => $this->link('symfony/console', 'php', '>=8.2')]);
 
         $this->assertSame([], $this->platformOvershoots($composer, [$package]));
+    }
+
+    public function test_updated_versions_diffs_the_scanned_packages_against_the_fresh_install(): void
+    {
+        $scan = new ScanResult([
+            $this->vulnerability('vendor/moved', '1.0.0', '<1.1.0'),
+            $this->vulnerability('vendor/stuck', '2.0.0', '<3.0.0'),
+        ], []);
+
+        $method = new ReflectionMethod(FixCommand::class, 'updatedVersions');
+        $updated = $method->invoke(new FixCommand(), $scan, [
+            $this->package('vendor/moved', '1.1.0'),
+            $this->package('vendor/stuck', '2.0.0'),
+        ]);
+
+        $this->assertSame([
+            ['package' => 'vendor/moved', 'from' => '1.0.0', 'to' => '1.1.0'],
+        ], $updated);
     }
 
     private function classifySkip(
