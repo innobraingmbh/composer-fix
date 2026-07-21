@@ -77,6 +77,33 @@ final class SafeVersionResolverTest extends TestCase
         $this->assertSame('2.0.0-alpha1', $alpha?->getPrettyVersion());
     }
 
+    public function test_it_never_picks_a_branch_head_even_at_dev_stability(): void
+    {
+        $candidates = $this->packages('10.10.0', '10.x-dev');
+
+        $safe = $this->resolver->lowestSafeVersion(
+            $candidates,
+            $this->affected('<10.48.29'),
+            $this->parser->normalize('10.10.0'),
+            'dev',
+        );
+
+        $this->assertNull($safe);
+    }
+
+    public function test_allow_dev_detects_a_branch_head_escape(): void
+    {
+        $dev = $this->resolver->lowestSafeVersion(
+            $this->packages('10.x-dev'),
+            $this->affected('<10.48.29'),
+            $this->parser->normalize('10.10.0'),
+            'dev',
+            allowDev: true,
+        );
+
+        $this->assertSame('10.x-dev', $dev?->getPrettyVersion());
+    }
+
     /**
      * @return list<PackageInterface>
      */

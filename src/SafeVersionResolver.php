@@ -17,6 +17,11 @@ final class SafeVersionResolver
      * A candidate qualifies when it meets the minimum stability, is outside the
      * affected range, and is not a downgrade. Null when none exists.
      *
+     * Branch heads (dev versions) are never fixes: on an EOL major the advisory
+     * prunes every tag and minimum-stability dev would let the solver land on
+     * e.g. 10.x-dev, which only hides the advisory. Pass $allowDev to detect
+     * that situation, not to fix with it.
+     *
      * @param  iterable<PackageInterface>  $candidates  every known version of the package
      */
     public function lowestSafeVersion(
@@ -24,6 +29,7 @@ final class SafeVersionResolver
         ConstraintInterface $affected,
         string $installedVersion,
         string $minimumStability = 'stable',
+        bool $allowDev = false,
     ): ?PackageInterface {
         $maxStability = BasePackage::$stabilities[$minimumStability] ?? BasePackage::$stabilities['stable'];
 
@@ -31,6 +37,10 @@ final class SafeVersionResolver
 
         foreach ($candidates as $candidate) {
             if ($candidate instanceof AliasPackage) {
+                continue;
+            }
+
+            if (! $allowDev && $candidate->isDev()) {
                 continue;
             }
 
