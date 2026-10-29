@@ -38,7 +38,8 @@ the fixes that are reachable. Each skip is reported with its reason:
 - `out-of-range` — the safe version is outside the root constraint; `--force` can bump it.
 - `transitive` — the constraints of installed dependents exclude the safe version;
   update the dependents or require the package directly.
-- `held-back` — a pool filter (e.g. soak-time) hides the safe version.
+- `held-back` — the safe version is too new for Composer's cooldown or a pool
+  filter (e.g. soak-time).
 - `dev-only` — only a branch head escapes the advisory. A dev build is never
   treated as a fix: on an EOL major with `minimum-stability: dev` the solver
   would otherwise land on e.g. `10.x-dev`, which only hides the advisory.
@@ -119,15 +120,20 @@ failed update). The exit code keeps its usual meaning.
 | `--no-fail` | Exit `0` even when packages remain vulnerable after the update. |
 | `--json` | Print a machine-readable result as the last line of stdout; messages move to stderr. |
 
-## Pool-filtering plugins (e.g. soak-time)
+## Cooldowns and pool-filtering plugins (e.g. soak-time)
 
-`composer fix` never picks a version another plugin would refuse to install.
-Both the update and `--force` selection go through Composer's normal pool
-creation (`PRE_POOL_CREATE`), so a plugin that prunes the pool — such as
-[soak-time](https://github.com/innobrain/soak-time) — also prunes what
-`composer fix` considers. If the only safe version is held back, `--force`
-reports it and leaves `composer.json` unchanged instead of bumping to a version
-that won't resolve.
+`composer fix` never picks a version the update would refuse to install.
+Selection builds its pool the way the update does: through Composer's normal
+pool creation (`PRE_POOL_CREATE`), so a plugin that prunes the pool — such as
+[soak-time](https://github.com/innobraingmbh/composer-soak-time) — also prunes
+what `composer fix` considers, and on Composer 2.11+ through Composer's cooldown
+(`policy.cooldown`). If the only safe version is held back, it is skipped so the
+other fixes still land, and `--force` leaves `composer.json` unchanged instead
+of bumping to a version that won't resolve.
+
+Like Composer's own update commands, `composer fix` dispatches the `command`
+plugin event before it resolves anything. On Composer 2.11+ soak-time uses it to
+exempt security fixes that are past its security window from the cooldown.
 
 ## How it works
 

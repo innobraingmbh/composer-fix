@@ -4,6 +4,7 @@ namespace Innobrain\ComposerFix;
 
 use Composer\Command\BaseCommand;
 use Composer\Composer;
+use Composer\DependencyResolver\CooldownPoolFilter;
 use Composer\DependencyResolver\Request;
 use Composer\Factory;
 use Composer\Installer;
@@ -12,6 +13,10 @@ use Composer\Json\JsonManipulator;
 use Composer\Package\PackageInterface;
 use Composer\Package\RootPackageInterface;
 use Composer\Package\Version\VersionSelector;
+use Composer\Plugin\CommandEvent;
+use Composer\Plugin\PluginEvents;
+use Composer\Policy\ListPolicyConfig;
+use Composer\Policy\PolicyConfig;
 use Composer\Repository\InstalledRepository;
 use Composer\Repository\RepositorySet;
 use Composer\Repository\RepositoryUtils;
@@ -83,6 +88,7 @@ EOT
     {
         $io = $this->getIO();
         $composer = $this->requireComposer();
+        $this->dispatchCommandEvent($composer, $input, $output);
 
         $noDev = (bool) $input->getOption('no-dev');
         $dryRun = (bool) $input->getOption('dry-run');
@@ -122,6 +128,7 @@ EOT
 
             $this->resetComposer();
             $composer = $this->requireComposer();
+            $this->dispatchCommandEvent($composer, $input, $output);
         }
 
         $allowList = $plan->allowList();
@@ -173,6 +180,17 @@ EOT
         $residual = $this->scan($composer, $freshInstalled, $ignoreUnreachable);
 
         return $this->finish($output, $scan, $plan, $updated, $residual, $overshoots, $this->reportResidual($io, $residual, $force, $noFail));
+    }
+
+    /**
+     * Composer's own update commands dispatch this event too. soak-time relies on
+     * it to exempt security fixes from Composer's cooldown before anything resolves.
+     */
+    private function dispatchCommandEvent(Composer $composer, InputInterface $input, OutputInterface $output): void
+    {
+        $event = new CommandEvent(PluginEvents::COMMAND, 'fix', $input, $output);
+
+        $composer->getEventDispatcher()->dispatch($event->getName(), $event);
     }
 
     private function scan(Composer $composer, array $installed, bool $ignoreUnreachable): ScanResult
@@ -358,8 +376,8 @@ EOT
             );
         }
 
-        // No installable safe version. If one exists among all published
-        // versions, it was held back by a pool filter such as soak-time.
+        // No installable safe version. If one exists among all published versions,
+        // it was held back by Composer's cooldown or a pool filter such as soak-time.
         $published = $repoSet->findPackages($name);
         $publishedSafe = $resolver->lowestSafeVersion($published, $affected, $installedVersion, $minimumStability);
 
@@ -376,8 +394,8 @@ EOT
 
     /**
      * Versions that survive a real pool build — built through the live event
-     * dispatcher so pool-filtering plugins (e.g. soak-time) prune them just as
-     * they will during the update.
+     * dispatcher and Composer's cooldown, so pool-filtering plugins (e.g.
+     * soak-time) and the cooldown prune them just as they will during the update.
      *
      * @param  list<string>  $names
      * @return array<string, list<PackageInterface>>
@@ -396,7 +414,11 @@ EOT
 
         $request->restrictPackages(array_map('strtolower', $names));
 
-        $pool = $repoSet->createPool($request, $this->getIO(), $composer->getEventDispatcher());
+        $cooldown = $this->cooldownFilter($composer);
+
+        $pool = $cooldown === null
+            ? $repoSet->createPool($request, $this->getIO(), $composer->getEventDispatcher())
+            : $repoSet->createPool($request, $this->getIO(), $composer->getEventDispatcher(), cooldownPoolFilter: $cooldown);
 
         $byName = [];
 
@@ -405,6 +427,24 @@ EOT
         }
 
         return $byName;
+    }
+
+    /**
+     * The same cooldown filter Composer 2.11's Installer applies during the update.
+     */
+    private function cooldownFilter(Composer $composer): ?CooldownPoolFilter
+    {
+        if (! class_exists(CooldownPoolFilter::class)) {
+            return null;
+        }
+
+        $policy = PolicyConfig::fromConfig($composer->getConfig());
+
+        if (! $policy->enabled || ! $policy->cooldown->shouldBlock(ListPolicyConfig::BLOCK_SCOPE_UPDATE)) {
+            return null;
+        }
+
+        return new CooldownPoolFilter($policy->cooldown);
     }
 
     /**
@@ -539,7 +579,7 @@ EOT
                 $skip->safeVersion,
             ),
             SkippedFix::HELD_BACK => sprintf(
-                '<warning>[composer-fix] %s %s is safe but held back by a pool filter (e.g. soak-time) — skipping. Re-run once it ages out, or skip the filter (SOAK_TIME_SKIP=%s).</warning>',
+                '<warning>[composer-fix] %s %s is safe but held back by a cooldown (Composer\'s or a pool filter such as soak-time) — skipping. Re-run once it ages out, or exempt the package (SOAK_TIME_SKIP=%s for soak-time, "policy.cooldown.ignore" for Composer).</warning>',
                 $skip->name,
                 $skip->safeVersion,
                 $skip->name,
